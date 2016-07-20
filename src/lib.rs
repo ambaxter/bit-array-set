@@ -2,13 +2,15 @@
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
+// Copyright 2016 The bit-set-array developers.
+//
 // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
 // http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! An implementation of a set using a bit vector as an underlying
+//! An implementation of a set using a bit array as an underlying
 //! representation for holding unsigned numerical elements.
 //!
 //! It should also be noted that the amount of storage necessary for holding a
@@ -18,10 +20,14 @@
 //! # Examples
 //!
 //! ```
-//! use bit_set::BitSet;
+//! extern crate typenum;
+//! # extern crate bitarray_set;
+//! use typenum::{Unsigned, U8};
+//! use bitarray_set::BitArraySet;
 //!
+//! # fn main() {
 //! // It's a regular set
-//! let mut s = BitSet::new();
+//! let mut s = BitArraySet::<u32, U8>::new();
 //! s.insert(0);
 //! s.insert(3);
 //! s.insert(7);
@@ -32,8 +38,8 @@
 //!     println!("There is no 7");
 //! }
 //!
-//! // Can initialize from a `BitVec`
-//! let other = BitSet::from_bytes(&[0b11010000]);
+//! // Can initialize from a `BitArray`
+//! let other = BitArraySet::<u32, U8>::from_bytes(&[0b11010000]);
 //!
 //! s.union_with(&other);
 //!
@@ -42,49 +48,43 @@
 //!     println!("{}", x);
 //! }
 //!
-//! // Can convert back to a `BitVec`
-//! let bv = s.into_bit_vec();
+//! // Can convert back to a `BitArray`
+//! let bv = s.into_bit_array();
 //! assert!(bv[3]);
+//! # }
 //! ```
 
 #![cfg_attr(all(test, feature = "nightly"), feature(test))]
 #[cfg(all(test, feature = "nightly"))] extern crate test;
 #[cfg(all(test, feature = "nightly"))] extern crate rand;
 extern crate bit_vec;
+extern crate bit_array;
+extern crate typenum;
+extern crate generic_array;
 
-use bit_vec::{BitVec, Blocks, BitBlock};
+use bit_vec::BitBlock;
+use bit_array::{BitsIn, BitArray, Blocks};
 use std::cmp::Ordering;
 use std::cmp;
 use std::fmt;
 use std::hash;
+use std::ops::*;
 use std::iter::{self, Chain, Enumerate, FromIterator, Repeat, Skip, Take};
+use typenum::{Unsigned, NonZero};
 
 type MatchWords<'a, B> = Chain<Enumerate<Blocks<'a, B>>, Skip<Take<Enumerate<Repeat<B>>>>>;
 
-/// Computes how many blocks are needed to store that many bits
-fn blocks_for_bits<B: BitBlock>(bits: usize) -> usize {
-    // If we want 17 bits, dividing by 32 will produce 0. So we add 1 to make sure we
-    // reserve enough. But if we want exactly a multiple of 32, this will actually allocate
-    // one too many. So we need to check if that's the case. We can do that by computing if
-    // bitwise AND by `32 - 1` is 0. But LLVM should be able to optimize the semantically
-    // superior modulo operator on a power of two to this.
-    //
-    // Note that we can technically avoid this branch with the expression
-    // `(nbits + BITS - 1) / 32::BITS`, but if nbits is almost usize::MAX this will overflow.
-    if bits % B::bits() == 0 {
-        bits / B::bits()
-    } else {
-        bits / B::bits() + 1
-    }
-}
-
-// Take two BitVec's, and return iterators of their words, where the shorter one
+// Take two BitArray's, and return iterators of their words, where the shorter one
 // has been padded with 0's
-fn match_words<'a, 'b, B: BitBlock>(a: &'a BitVec<B>, b: &'b BitVec<B>)
+fn match_words<'a, 'b, B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero>(a: &'a BitArray<B, NBits>, b: &'b BitArray<B, NBits>)
     -> (MatchWords<'a, B>, MatchWords<'b, B>)
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
 {
-    let a_len = a.storage().len();
-    let b_len = b.storage().len();
+    let a_len = a.len();
+    let b_len = b.len();
 
     // have to uselessly pretend to pad the longer one for type matching
     if a_len < b_len {
@@ -96,28 +96,48 @@ fn match_words<'a, 'b, B: BitBlock>(a: &'a BitVec<B>, b: &'b BitVec<B>)
     }
 }
 
-pub struct BitSet<B = u32> {
-    bit_vec: BitVec<B>,
+pub struct BitArraySet<B: BitsIn, NBits: Unsigned + NonZero> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+    bit_array: BitArray<B, NBits>,
 }
 
-impl<B: BitBlock> Clone for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero>  Clone for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     fn clone(&self) -> Self {
-        BitSet {
-            bit_vec: self.bit_vec.clone(),
+        BitArraySet {
+            bit_array: self.bit_array.clone(),
         }
     }
 
     fn clone_from(&mut self, other: &Self) {
-        self.bit_vec.clone_from(&other.bit_vec);
+        self.bit_array.clone_from(&other.bit_array);
     }
 }
 
-impl<B: BitBlock> Default for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> Default for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+ {
     #[inline]
-    fn default() -> Self { BitSet { bit_vec: Default::default() } }
+    fn default() -> Self { BitArraySet { bit_array: Default::default() } }
 }
 
-impl<B: BitBlock> FromIterator<usize> for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> FromIterator<usize> for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         let mut ret = Self::default();
         ret.extend(iter);
@@ -125,7 +145,12 @@ impl<B: BitBlock> FromIterator<usize> for BitSet<B> {
     }
 }
 
-impl<B: BitBlock> Extend<usize> for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default + BitAnd + BitOr, NBits: Unsigned + NonZero> Extend<usize> for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     #[inline]
     fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
         for i in iter {
@@ -134,75 +159,90 @@ impl<B: BitBlock> Extend<usize> for BitSet<B> {
     }
 }
 
-impl<B: BitBlock> PartialOrd for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> PartialOrd for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.iter().partial_cmp(other)
     }
 }
 
-impl<B: BitBlock> Ord for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> Ord for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         self.iter().cmp(other)
     }
 }
 
-impl<B: BitBlock> PartialEq for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> PartialEq for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.iter().eq(other)
     }
 }
 
-impl<B: BitBlock> Eq for BitSet<B> {}
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> Eq for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{}
 
-impl BitSet<u32> {
-    /// Creates a new empty `BitSet`.
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+
+    /// Creates a new empty `BitArraySet`.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
-    /// let mut s = BitSet::new();
+    /// # fn main() {
+    /// let mut s = BitArraySet::<u32, U8>::new();
+    /// # }
     /// ```
     #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Creates a new `BitSet` with initially no contents, able to
-    /// hold `nbits` elements without resizing.
+    /// Creates a new `BitArraySet` from the given bit array.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
-    ///
-    /// let mut s = BitSet::with_capacity(100);
-    /// assert!(s.capacity() >= 100);
-    /// ```
-    #[inline]
-    pub fn with_capacity(nbits: usize) -> Self {
-        let bit_vec = BitVec::from_elem(nbits, false);
-        Self::from_bit_vec(bit_vec)
-    }
-
-    /// Creates a new `BitSet` from the given bit vector.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// extern crate bit_vec;
-    /// extern crate bit_set;
+    /// extern crate typenum;
+    /// extern crate bit_array;
+    /// extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bit_array::BitArray;
+    /// use bitarray_set::BitArraySet;
     ///
     /// fn main() {
-    ///     use bit_vec::BitVec;
-    ///     use bit_set::BitSet;
-    ///
-    ///     let bv = BitVec::from_bytes(&[0b01100000]);
-    ///     let s = BitSet::from_bit_vec(bv);
+    ///     let bv = BitArray::<u32, U8>::from_bytes(&[0b01100000]);
+    ///     let s = BitArraySet::from_bit_array(bv);
     ///
     ///     // Print 1, 2 in arbitrary order
     ///     for x in s.iter() {
@@ -211,199 +251,106 @@ impl BitSet<u32> {
     /// }
     /// ```
     #[inline]
-    pub fn from_bit_vec(bit_vec: BitVec) -> Self {
-        BitSet { bit_vec: bit_vec }
+    pub fn from_bit_array(bit_array: BitArray<B, NBits>) -> Self {
+        BitArraySet { bit_array: bit_array }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        BitSet { bit_vec: BitVec::from_bytes(bytes) }
+        BitArraySet { bit_array: BitArray::from_bytes(bytes) }
     }
-}
 
-impl<B: BitBlock> BitSet<B> {
-
-    /// Returns the capacity in bits for this bit vector. Inserting any
-    /// element less than this amount will not trigger a resizing.
+    /// Consumes this set to return the underlying bit array.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
-    /// let mut s = BitSet::with_capacity(100);
-    /// assert!(s.capacity() >= 100);
-    /// ```
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.bit_vec.capacity()
-    }
-
-    /// Reserves capacity for the given `BitSet` to contain `len` distinct elements. In the case
-    /// of `BitSet` this means reallocations will not occur as long as all inserted elements
-    /// are less than `len`.
-    ///
-    /// The collection may reserve more space to avoid frequent reallocations.
-    ///
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bit_set::BitSet;
-    ///
-    /// let mut s = BitSet::new();
-    /// s.reserve_len(10);
-    /// assert!(s.capacity() >= 10);
-    /// ```
-    pub fn reserve_len(&mut self, len: usize) {
-        let cur_len = self.bit_vec.len();
-        if len >= cur_len {
-            self.bit_vec.reserve(len - cur_len);
-        }
-    }
-
-    /// Reserves the minimum capacity for the given `BitSet` to contain `len` distinct elements.
-    /// In the case of `BitSet` this means reallocations will not occur as long as all inserted
-    /// elements are less than `len`.
-    ///
-    /// Note that the allocator may give the collection more space than it requests. Therefore
-    /// capacity can not be relied upon to be precisely minimal. Prefer `reserve_len` if future
-    /// insertions are expected.
-    ///
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bit_set::BitSet;
-    ///
-    /// let mut s = BitSet::new();
-    /// s.reserve_len_exact(10);
-    /// assert!(s.capacity() >= 10);
-    /// ```
-    pub fn reserve_len_exact(&mut self, len: usize) {
-        let cur_len = self.bit_vec.len();
-        if len >= cur_len {
-            self.bit_vec.reserve_exact(len - cur_len);
-        }
-    }
-
-    /// Consumes this set to return the underlying bit vector.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bit_set::BitSet;
-    ///
-    /// let mut s = BitSet::new();
+    /// # fn main() {
+    /// let mut s = BitArraySet::<u32, U8>::new();
     /// s.insert(0);
     /// s.insert(3);
     ///
-    /// let bv = s.into_bit_vec();
+    /// let bv = s.into_bit_array();
     /// assert!(bv[0]);
     /// assert!(bv[3]);
+    /// # }
     /// ```
     #[inline]
-    pub fn into_bit_vec(self) -> BitVec<B> {
-        self.bit_vec
+    pub fn into_bit_array(self) -> BitArray<B, NBits> {
+        self.bit_array
     }
 
-    /// Returns a reference to the underlying bit vector.
+    /// Returns a reference to the underlying bit array.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
-    /// let mut s = BitSet::new();
+    /// # fn main() {
+    /// let mut s = BitArraySet::<u32, U8>::new();
     /// s.insert(0);
     ///
     /// let bv = s.get_ref();
     /// assert_eq!(bv[0], true);
+    /// # }
     /// ```
     #[inline]
-    pub fn get_ref(&self) -> &BitVec<B> {
-        &self.bit_vec
+    pub fn get_ref(&self) -> &BitArray<B, NBits> {
+        &self.bit_array
     }
 
     #[inline]
     fn other_op<F>(&mut self, other: &Self, mut f: F) where F: FnMut(B, B) -> B {
-        // Unwrap BitVecs
-        let self_bit_vec = &mut self.bit_vec;
-        let other_bit_vec = &other.bit_vec;
-
-        let self_len = self_bit_vec.len();
-        let other_len = other_bit_vec.len();
-
-        // Expand the vector if necessary
-        if self_len < other_len {
-            self_bit_vec.grow(other_len - self_len, false);
-        }
+        // Unwrap BitArrays
+        let self_bit_array = &mut self.bit_array;
+        let other_bit_array = &other.bit_array;
 
         // virtually pad other with 0's for equal lengths
         let other_words = {
-            let (_, result) = match_words(self_bit_vec, other_bit_vec);
+            let (_, result) = match_words(self_bit_array, other_bit_array);
             result
         };
 
         // Apply values found in other
         for (i, w) in other_words {
-            let old = self_bit_vec.storage()[i];
+            let old = self_bit_array.storage()[i];
             let new = f(old, w);
             unsafe {
-                self_bit_vec.storage_mut()[i] = new;
+                self_bit_array.storage_mut()[i] = new;
             }
         }
     }
 
-    /// Truncates the underlying vector to the least length required.
+    /// Iterator over each usize stored in the `BitArraySet`.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
-    /// let mut s = BitSet::new();
-    /// s.insert(32183231);
-    /// s.remove(32183231);
-    ///
-    /// // Internal storage will probably be bigger than necessary
-    /// println!("old capacity: {}", s.capacity());
-    ///
-    /// // Now should be smaller
-    /// s.shrink_to_fit();
-    /// println!("new capacity: {}", s.capacity());
-    /// ```
-    #[inline]
-    pub fn shrink_to_fit(&mut self) {
-        let bit_vec = &mut self.bit_vec;
-        // Obtain original length
-        let old_len = bit_vec.storage().len();
-        // Obtain coarse trailing zero length
-        let n = bit_vec.storage().iter().rev().take_while(|&&n| n == B::zero()).count();
-        // Truncate
-        let trunc_len = cmp::max(old_len - n, 1);
-        unsafe {
-            bit_vec.storage_mut().truncate(trunc_len);
-            bit_vec.set_len(trunc_len * B::bits());
-        }
-    }
-
-    /// Iterator over each usize stored in the `BitSet`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bit_set::BitSet;
-    ///
-    /// let s = BitSet::from_bytes(&[0b01001010]);
+    /// # fn main() {
+    /// let s = BitArraySet::<u32, U8>::from_bytes(&[0b01001010]);
     ///
     /// // Print 1, 4, 6 in arbitrary order
     /// for x in s.iter() {
     ///     println!("{}", x);
     /// }
+    /// # }
     /// ```
     #[inline]
     pub fn iter(&self) -> Iter<B> {
-        Iter(BlockIter::from_blocks(self.bit_vec.blocks()))
+        Iter(BlockIter::from_blocks(self.bit_array.blocks()))
     }
 
     /// Iterator over each usize stored in `self` union `other`.
@@ -412,23 +359,28 @@ impl<B: BitBlock> BitSet<B> {
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
-    /// let a = BitSet::from_bytes(&[0b01101000]);
-    /// let b = BitSet::from_bytes(&[0b10100000]);
+    /// # fn main() {
+    /// let a = BitArraySet::<u32, U8>::from_bytes(&[0b01101000]);
+    /// let b = BitArraySet::<u32, U8>::from_bytes(&[0b10100000]);
     ///
     /// // Print 0, 1, 2, 4 in arbitrary order
     /// for x in a.union(&b) {
     ///     println!("{}", x);
     /// }
+    /// # }
     /// ```
     #[inline]
     pub fn union<'a>(&'a self, other: &'a Self) -> Union<'a, B> {
         fn or<B: BitBlock>(w1: B, w2: B) -> B { w1 | w2 }
 
         Union(BlockIter::from_blocks(TwoBitPositions {
-            set: self.bit_vec.blocks(),
-            other: other.bit_vec.blocks(),
+            set: self.bit_array.blocks(),
+            other: other.bit_array.blocks(),
             merge: or,
         }))
     }
@@ -439,24 +391,29 @@ impl<B: BitBlock> BitSet<B> {
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
-    /// let a = BitSet::from_bytes(&[0b01101000]);
-    /// let b = BitSet::from_bytes(&[0b10100000]);
+    /// # fn main() {
+    /// let a = BitArraySet::<u32, U8>::from_bytes(&[0b01101000]);
+    /// let b = BitArraySet::<u32, U8>::from_bytes(&[0b10100000]);
     ///
     /// // Print 2
     /// for x in a.intersection(&b) {
     ///     println!("{}", x);
     /// }
+    /// # }
     /// ```
     #[inline]
     pub fn intersection<'a>(&'a self, other: &'a Self) -> Intersection<'a, B> {
         fn bitand<B: BitBlock>(w1: B, w2: B) -> B { w1 & w2 }
-        let min = cmp::min(self.bit_vec.len(), other.bit_vec.len());
+        let min = cmp::min(self.bit_array.len(), other.bit_array.len());
 
         Intersection(BlockIter::from_blocks(TwoBitPositions {
-            set: self.bit_vec.blocks(),
-            other: other.bit_vec.blocks(),
+            set: self.bit_array.blocks(),
+            other: other.bit_array.blocks(),
             merge: bitand,
         }).take(min))
     }
@@ -467,10 +424,14 @@ impl<B: BitBlock> BitSet<B> {
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
-    /// let a = BitSet::from_bytes(&[0b01101000]);
-    /// let b = BitSet::from_bytes(&[0b10100000]);
+    /// # fn main() {
+    /// let a = BitArraySet::<u32, U8>::from_bytes(&[0b01101000]);
+    /// let b = BitArraySet::<u32, U8>::from_bytes(&[0b10100000]);
     ///
     /// // Print 1, 4 in arbitrary order
     /// for x in a.difference(&b) {
@@ -483,14 +444,15 @@ impl<B: BitBlock> BitSet<B> {
     /// for x in b.difference(&a) {
     ///     println!("{}", x);
     /// }
+    /// # }
     /// ```
     #[inline]
     pub fn difference<'a>(&'a self, other: &'a Self) -> Difference<'a, B> {
-        fn diff<B: BitBlock>(w1: B, w2: B) -> B { w1 & !w2 }
+        fn diff<B: BitBlock>(w1: B, w2: B) -> <B as std::ops::BitAnd>::Output { w1 & !w2 }
 
         Difference(BlockIter::from_blocks(TwoBitPositions {
-            set: self.bit_vec.blocks(),
-            other: other.bit_vec.blocks(),
+            set: self.bit_array.blocks(),
+            other: other.bit_array.blocks(),
             merge: diff,
         }))
     }
@@ -502,232 +464,177 @@ impl<B: BitBlock> BitSet<B> {
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
-    /// let a = BitSet::from_bytes(&[0b01101000]);
-    /// let b = BitSet::from_bytes(&[0b10100000]);
+    /// # fn main() {
+    /// let a = BitArraySet::<u32, U8>::from_bytes(&[0b01101000]);
+    /// let b = BitArraySet::<u32, U8>::from_bytes(&[0b10100000]);
     ///
     /// // Print 0, 1, 4 in arbitrary order
     /// for x in a.symmetric_difference(&b) {
     ///     println!("{}", x);
     /// }
+    /// # }
     /// ```
     #[inline]
     pub fn symmetric_difference<'a>(&'a self, other: &'a Self) -> SymmetricDifference<'a, B> {
         fn bitxor<B: BitBlock>(w1: B, w2: B) -> B { w1 ^ w2 }
 
         SymmetricDifference(BlockIter::from_blocks(TwoBitPositions {
-            set: self.bit_vec.blocks(),
-            other: other.bit_vec.blocks(),
+            set: self.bit_array.blocks(),
+            other: other.bit_array.blocks(),
             merge: bitxor,
         }))
     }
 
-    /// Unions in-place with the specified other bit vector.
+    /// Unions in-place with the specified other bit array.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
+    /// # fn main() {
     /// let a   = 0b01101000;
     /// let b   = 0b10100000;
     /// let res = 0b11101000;
     ///
-    /// let mut a = BitSet::from_bytes(&[a]);
-    /// let b = BitSet::from_bytes(&[b]);
-    /// let res = BitSet::from_bytes(&[res]);
+    /// let mut a = BitArraySet::<u32, U8>::from_bytes(&[a]);
+    /// let b = BitArraySet::<u32, U8>::from_bytes(&[b]);
+    /// let res = BitArraySet::<u32, U8>::from_bytes(&[res]);
     ///
     /// a.union_with(&b);
     /// assert_eq!(a, res);
+    /// # }
     /// ```
     #[inline]
     pub fn union_with(&mut self, other: &Self) {
         self.other_op(other, |w1, w2| w1 | w2);
     }
 
-    /// Intersects in-place with the specified other bit vector.
+    /// Intersects in-place with the specified other bit array.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
+    /// # fn main() {
     /// let a   = 0b01101000;
     /// let b   = 0b10100000;
     /// let res = 0b00100000;
     ///
-    /// let mut a = BitSet::from_bytes(&[a]);
-    /// let b = BitSet::from_bytes(&[b]);
-    /// let res = BitSet::from_bytes(&[res]);
+    /// let mut a = BitArraySet::<u32, U8>::from_bytes(&[a]);
+    /// let b = BitArraySet::<u32, U8>::from_bytes(&[b]);
+    /// let res = BitArraySet::<u32, U8>::from_bytes(&[res]);
     ///
     /// a.intersect_with(&b);
     /// assert_eq!(a, res);
+    /// # }
     /// ```
     #[inline]
     pub fn intersect_with(&mut self, other: &Self) {
         self.other_op(other, |w1, w2| w1 & w2);
     }
 
-    /// Makes this bit vector the difference with the specified other bit vector
+    /// Makes this bit array the difference with the specified other bit array
     /// in-place.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
+    /// # fn main() {
     /// let a   = 0b01101000;
     /// let b   = 0b10100000;
     /// let a_b = 0b01001000; // a - b
     /// let b_a = 0b10000000; // b - a
     ///
-    /// let mut bva = BitSet::from_bytes(&[a]);
-    /// let bvb = BitSet::from_bytes(&[b]);
-    /// let bva_b = BitSet::from_bytes(&[a_b]);
-    /// let bvb_a = BitSet::from_bytes(&[b_a]);
+    /// let mut bva = BitArraySet::<u32, U8>::from_bytes(&[a]);
+    /// let bvb = BitArraySet::<u32, U8>::from_bytes(&[b]);
+    /// let bva_b = BitArraySet::<u32, U8>::from_bytes(&[a_b]);
+    /// let bvb_a = BitArraySet::<u32, U8>::from_bytes(&[b_a]);
     ///
     /// bva.difference_with(&bvb);
     /// assert_eq!(bva, bva_b);
     ///
-    /// let bva = BitSet::from_bytes(&[a]);
-    /// let mut bvb = BitSet::from_bytes(&[b]);
+    /// let bva = BitArraySet::<u32, U8>::from_bytes(&[a]);
+    /// let mut bvb = BitArraySet::<u32, U8>::from_bytes(&[b]);
     ///
     /// bvb.difference_with(&bva);
     /// assert_eq!(bvb, bvb_a);
+    /// # }
     /// ```
     #[inline]
     pub fn difference_with(&mut self, other: &Self) {
         self.other_op(other, |w1, w2| w1 & !w2);
     }
 
-    /// Makes this bit vector the symmetric difference with the specified other
-    /// bit vector in-place.
+    /// Makes this bit array the symmetric difference with the specified other
+    /// bit array in-place.
     ///
     /// # Examples
     ///
     /// ```
-    /// use bit_set::BitSet;
+    /// extern crate typenum;
+    /// # extern crate bitarray_set;
+    /// use typenum::{Unsigned, U8};
+    /// use bitarray_set::BitArraySet;
     ///
+    /// # fn main() {
     /// let a   = 0b01101000;
     /// let b   = 0b10100000;
     /// let res = 0b11001000;
     ///
-    /// let mut a = BitSet::from_bytes(&[a]);
-    /// let b = BitSet::from_bytes(&[b]);
-    /// let res = BitSet::from_bytes(&[res]);
+    /// let mut a = BitArraySet::<u32, U8>::from_bytes(&[a]);
+    /// let b = BitArraySet::<u32, U8>::from_bytes(&[b]);
+    /// let res = BitArraySet::<u32, U8>::from_bytes(&[res]);
     ///
     /// a.symmetric_difference_with(&b);
     /// assert_eq!(a, res);
+    /// # }
     /// ```
     #[inline]
     pub fn symmetric_difference_with(&mut self, other: &Self) {
         self.other_op(other, |w1, w2| w1 ^ w2);
     }
 
-/*
-    /// Moves all elements from `other` into `Self`, leaving `other` empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bit_set::BitSet;
-    ///
-    /// let mut a = BitSet::new();
-    /// a.insert(2);
-    /// a.insert(6);
-    ///
-    /// let mut b = BitSet::new();
-    /// b.insert(1);
-    /// b.insert(3);
-    /// b.insert(6);
-    ///
-    /// a.append(&mut b);
-    ///
-    /// assert_eq!(a.len(), 4);
-    /// assert_eq!(b.len(), 0);
-    /// assert_eq!(a, BitSet::from_bytes(&[0b01110010]));
-    /// ```
-    pub fn append(&mut self, other: &mut Self) {
-        self.union_with(other);
-        other.clear();
-    }
-
-    /// Splits the `BitSet` into two at the given key including the key.
-    /// Retains the first part in-place while returning the second part.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bit_set::BitSet;
-    ///
-    /// let mut a = BitSet::new();
-    /// a.insert(2);
-    /// a.insert(6);
-    /// a.insert(1);
-    /// a.insert(3);
-    ///
-    /// let b = a.split_off(3);
-    ///
-    /// assert_eq!(a.len(), 2);
-    /// assert_eq!(b.len(), 2);
-    /// assert_eq!(a, BitSet::from_bytes(&[0b01100000]));
-    /// assert_eq!(b, BitSet::from_bytes(&[0b00010010]));
-    /// ```
-    pub fn split_off(&mut self, at: usize) -> Self {
-        let mut other = BitSet::new();
-
-        if at == 0 {
-            swap(self, &mut other);
-            return other;
-        } else if at >= self.bit_vec.len() {
-            return other;
-        }
-
-        // Calculate block and bit at which to split
-        let w = at / BITS;
-        let b = at % BITS;
-
-        // Pad `other` with `w` zero blocks,
-        // append `self`'s blocks in the range from `w` to the end to `other`
-        other.bit_vec.storage_mut().extend(repeat(0u32).take(w)
-                                     .chain(self.bit_vec.storage()[w..].iter().cloned()));
-        other.bit_vec.nbits = self.bit_vec.nbits;
-
-        if b > 0 {
-            other.bit_vec.storage_mut()[w] &= !0 << b;
-        }
-
-        // Sets `bit_vec.len()` and fixes the last block as well
-        self.bit_vec.truncate(at);
-
-        other
-    }
-*/
-
     /// Returns the number of set bits in this set.
     #[inline]
     pub fn len(&self) -> usize  {
-        self.bit_vec.blocks().fold(0, |acc, n| acc + n.count_ones() as usize)
+        self.bit_array.blocks().fold(0, |acc, n| acc + n.count_ones() as usize)
     }
 
     /// Returns whether there are no bits set in this set
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.bit_vec.none()
+        self.bit_array.none()
     }
 
     /// Clears all bits in this set
     #[inline]
     pub fn clear(&mut self) {
-        self.bit_vec.clear();
+        self.bit_array.clear();
     }
 
     /// Returns `true` if this set contains the specified integer.
     #[inline]
     pub fn contains(&self, value: usize) -> bool {
-        let bit_vec = &self.bit_vec;
-        value < bit_vec.len() && bit_vec[value]
+        let bit_array = &self.bit_array;
+        value < bit_array.len() && bit_array[value]
     }
 
     /// Returns `true` if the set has no elements in common with `other`.
@@ -740,14 +647,11 @@ impl<B: BitBlock> BitSet<B> {
     /// Returns `true` if the set is a subset of another.
     #[inline]
     pub fn is_subset(&self, other: &Self) -> bool {
-        let self_bit_vec = &self.bit_vec;
-        let other_bit_vec = &other.bit_vec;
-        let other_blocks = blocks_for_bits::<B>(other_bit_vec.len());
+        let self_bit_array = &self.bit_array;
+        let other_bit_array = &other.bit_array;
 
         // Check that `self` intersect `other` is self
-        self_bit_vec.blocks().zip(other_bit_vec.blocks()).all(|(w1, w2)| w1 & w2 == w1) &&
-        // Make sure if `self` has any more blocks than `other`, they're all 0
-        self_bit_vec.blocks().skip(other_blocks).all(|w| w == B::zero())
+        self_bit_array.blocks().zip(other_bit_array.blocks()).all(|(w1, w2)| w1 & w2 == w1)
     }
 
     /// Returns `true` if the set is a superset of another.
@@ -759,17 +663,12 @@ impl<B: BitBlock> BitSet<B> {
     /// Adds a value to the set. Returns `true` if the value was not already
     /// present in the set.
     pub fn insert(&mut self, value: usize) -> bool {
+        assert!(value <= NBits::to_usize(), "BitArraySet can only handle {:?} entries. Insert to {:?} requested.", NBits::to_usize(), value);
         if self.contains(value) {
             return false;
         }
 
-        // Ensure we have enough space to hold the new element
-        let len = self.bit_vec.len();
-        if value >= len {
-            self.bit_vec.grow(value - len + 1, false)
-        }
-
-        self.bit_vec.set(value, true);
+        self.bit_array.set(value, true);
         return true;
     }
 
@@ -780,19 +679,29 @@ impl<B: BitBlock> BitSet<B> {
             return false;
         }
 
-        self.bit_vec.set(value, false);
+        self.bit_array.set(value, false);
 
         return true;
     }
 }
 
-impl<B: BitBlock> fmt::Debug for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> fmt::Debug for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_set().entries(self).finish()
     }
 }
 
-impl<B: BitBlock> hash::Hash for BitSet<B> {
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> hash::Hash for BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         for pos in self {
             pos.hash(state);
@@ -814,7 +723,7 @@ impl<T, B: BitBlock> BlockIter<T, B> where T: Iterator<Item=B> {
     }
 }
 
-/// An iterator combining two `BitSet` iterators.
+/// An iterator combining two `BitArraySet` iterators.
 #[derive(Clone)]
 struct TwoBitPositions<'a, B: 'a> {
     set: Blocks<'a, B>,
@@ -822,7 +731,7 @@ struct TwoBitPositions<'a, B: 'a> {
     merge: fn(B, B) -> B,
 }
 
-/// An iterator for `BitSet`.
+/// An iterator for `BitArraySet`.
 #[derive(Clone)]
 pub struct Iter<'a, B: 'a>(BlockIter<Blocks<'a, B>, B>);
 #[derive(Clone)]
@@ -927,7 +836,12 @@ impl<'a, B: BitBlock> Iterator for SymmetricDifference<'a, B> {
     #[inline] fn size_hint(&self) -> (usize, Option<usize>) { self.0.size_hint() }
 }
 
-impl<'a, B: BitBlock> IntoIterator for &'a BitSet<B> {
+impl<'a, B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> IntoIterator for &'a BitArraySet<B, NBits> 
+    where NBits: Add<<B as BitsIn>::Output>,
+    <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+    <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+    <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
     type Item = usize;
     type IntoIter = Iter<'a, B>;
 
@@ -939,12 +853,13 @@ impl<'a, B: BitBlock> IntoIterator for &'a BitSet<B> {
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering::{Equal, Greater, Less};
-    use super::BitSet;
-    use bit_vec::BitVec;
+    use super::BitArraySet;
+    use bit_array::BitArray;
+    use typenum::{U4, U8, U10, U51, U64, U100, U104, U152, U201, U221, U401, U501, U1001};
 
     #[test]
     fn test_bit_set_show() {
-        let mut s = BitSet::new();
+        let mut s = BitArraySet::<u32, U51>::new();
         s.insert(1);
         s.insert(10);
         s.insert(50);
@@ -955,8 +870,8 @@ mod tests {
     #[test]
     fn test_bit_set_from_usizes() {
         let usizes = vec![0, 2, 2, 3];
-        let a: BitSet = usizes.into_iter().collect();
-        let mut b = BitSet::new();
+        let a: BitArraySet<u32, U4> = usizes.into_iter().collect();
+        let mut b = BitArraySet::new();
         b.insert(0);
         b.insert(2);
         b.insert(3);
@@ -966,36 +881,48 @@ mod tests {
     #[test]
     fn test_bit_set_iterator() {
         let usizes = vec![0, 2, 2, 3];
-        let bit_vec: BitSet = usizes.into_iter().collect();
+        let bit_array: BitArraySet<u32, U4> = usizes.into_iter().collect();
 
-        let idxs: Vec<_> = bit_vec.iter().collect();
+        let idxs: Vec<_> = bit_array.iter().collect();
         assert_eq!(idxs, [0, 2, 3]);
 
-        let long: BitSet = (0..10000).filter(|&n| n % 2 == 0).collect();
-        let real: Vec<_> = (0..10000/2).map(|x| x*2).collect();
+        let long: BitArraySet<u32, U1001> = (0..1000).filter(|&n| n % 2 == 0).collect();
+        let real: Vec<_> = (0..1000/2).map(|x| x*2).collect();
 
         let idxs: Vec<_> = long.iter().collect();
         assert_eq!(idxs, real);
     }
 
     #[test]
-    fn test_bit_set_frombit_vec_init() {
+    fn test_bit_set_frombit_array_init() {
         let bools = [true, false];
-        let lengths = [10, 64, 100];
         for &b in &bools {
-            for &l in &lengths {
-                let bitset = BitSet::from_bit_vec(BitVec::from_elem(l, b));
-                assert_eq!(bitset.contains(1), b);
-                assert_eq!(bitset.contains((l-1)), b);
-                assert!(!bitset.contains(l));
-            }
+            let bitset_10 = BitArraySet::from_bit_array(BitArray::<u32, U10>::from_elem(b));
+            let bitset_64 = BitArraySet::from_bit_array(BitArray::<u32, U64>::from_elem(b));
+            let bitset_100 = BitArraySet::from_bit_array(BitArray::<u32, U100>::from_elem(b));
+
+            assert_eq!(bitset_10.contains(1), b);
+            assert_eq!(bitset_10.contains((9)), b);
+            assert!(!bitset_10.contains(10));
+
+            assert_eq!(bitset_64.contains(1), b);
+            assert_eq!(bitset_64.contains((63)), b);
+            assert!(!bitset_64.contains(64));
+
+            assert_eq!(bitset_100.contains(1), b);
+            assert_eq!(bitset_100.contains((99)), b);
+            assert!(!bitset_100.contains(100));
         }
     }
 
     #[test]
-    fn test_bit_vec_masking() {
-        let b = BitVec::from_elem(140, true);
-        let mut bs = BitSet::from_bit_vec(b);
+    fn test_bit_array_masking() {
+        let b: BitArray<u32, U152> = BitArray::from_elem(true);
+        let mut bs = BitArraySet::from_bit_array(b);
+        bs.remove(140);
+        bs.remove(149);
+        bs.remove(150);
+        bs.remove(151);
         assert!(bs.contains(139));
         assert!(!bs.contains(140));
         assert!(bs.insert(150));
@@ -1007,7 +934,7 @@ mod tests {
 
     #[test]
     fn test_bit_set_basic() {
-        let mut b = BitSet::new();
+        let mut b = BitArraySet::<u32, U401>::new();
         assert!(b.insert(3));
         assert!(!b.insert(3));
         assert!(b.contains(3));
@@ -1022,8 +949,8 @@ mod tests {
 
     #[test]
     fn test_bit_set_intersection() {
-        let mut a = BitSet::new();
-        let mut b = BitSet::new();
+        let mut a = BitArraySet::<u32, U104>::new();
+        let mut b = BitArraySet::<u32, U104>::new();
 
         assert!(a.insert(11));
         assert!(a.insert(1));
@@ -1045,8 +972,8 @@ mod tests {
 
     #[test]
     fn test_bit_set_difference() {
-        let mut a = BitSet::new();
-        let mut b = BitSet::new();
+        let mut a = BitArraySet::<u32, U501>::new();
+        let mut b = BitArraySet::<u32, U501>::new();
 
         assert!(a.insert(1));
         assert!(a.insert(3));
@@ -1064,8 +991,8 @@ mod tests {
 
     #[test]
     fn test_bit_set_symmetric_difference() {
-        let mut a = BitSet::new();
-        let mut b = BitSet::new();
+        let mut a = BitArraySet::<u32, U221>::new();
+        let mut b = BitArraySet::<u32, U221>::new();
 
         assert!(a.insert(1));
         assert!(a.insert(3));
@@ -1085,8 +1012,8 @@ mod tests {
 
     #[test]
     fn test_bit_set_union() {
-        let mut a = BitSet::new();
-        let mut b = BitSet::new();
+        let mut a = BitArraySet::<u32, U201>::new();
+        let mut b = BitArraySet::<u32, U201>::new();
         assert!(a.insert(1));
         assert!(a.insert(3));
         assert!(a.insert(5));
@@ -1110,8 +1037,8 @@ mod tests {
 
     #[test]
     fn test_bit_set_subset() {
-        let mut set1 = BitSet::new();
-        let mut set2 = BitSet::new();
+        let mut set1 = BitArraySet::<u32, U401>::new();
+        let mut set2 = BitArraySet::<u32, U401>::new();
 
         assert!(set1.is_subset(&set2)); //  {}  {}
         set2.insert(100);
@@ -1136,10 +1063,10 @@ mod tests {
 
     #[test]
     fn test_bit_set_is_disjoint() {
-        let a = BitSet::from_bytes(&[0b10100010]);
-        let b = BitSet::from_bytes(&[0b01000000]);
-        let c = BitSet::new();
-        let d = BitSet::from_bytes(&[0b00110000]);
+        let a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let b = BitArraySet::<u32, U8>::from_bytes(&[0b01000000]);
+        let c = BitArraySet::<u32, U8>::new();
+        let d = BitArraySet::<u32, U8>::from_bytes(&[0b00110000]);
 
         assert!(!a.is_disjoint(&d));
         assert!(!d.is_disjoint(&a));
@@ -1155,17 +1082,17 @@ mod tests {
     #[test]
     fn test_bit_set_union_with() {
         //a should grow to include larger elements
-        let mut a = BitSet::new();
+        let mut a = BitArraySet::<u32, U8>::new();
         a.insert(0);
-        let mut b = BitSet::new();
+        let mut b = BitArraySet::<u32, U8>::new();
         b.insert(5);
-        let expected = BitSet::from_bytes(&[0b10000100]);
+        let expected = BitArraySet::<u32, U8>::from_bytes(&[0b10000100]);
         a.union_with(&b);
         assert_eq!(a, expected);
 
         // Standard
-        let mut a = BitSet::from_bytes(&[0b10100010]);
-        let mut b = BitSet::from_bytes(&[0b01100010]);
+        let mut a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let mut b = BitArraySet::<u32, U8>::from_bytes(&[0b01100010]);
         let c = a.clone();
         a.union_with(&b);
         b.union_with(&c);
@@ -1176,8 +1103,8 @@ mod tests {
     #[test]
     fn test_bit_set_intersect_with() {
         // Explicitly 0'ed bits
-        let mut a = BitSet::from_bytes(&[0b10100010]);
-        let mut b = BitSet::from_bytes(&[0b00000000]);
+        let mut a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let mut b = BitArraySet::<u32, U8>::from_bytes(&[0b00000000]);
         let c = a.clone();
         a.intersect_with(&b);
         b.intersect_with(&c);
@@ -1185,8 +1112,8 @@ mod tests {
         assert!(b.is_empty());
 
         // Uninitialized bits should behave like 0's
-        let mut a = BitSet::from_bytes(&[0b10100010]);
-        let mut b = BitSet::new();
+        let mut a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let mut b = BitArraySet::<u32, U8>::new();
         let c = a.clone();
         a.intersect_with(&b);
         b.intersect_with(&c);
@@ -1194,8 +1121,8 @@ mod tests {
         assert!(b.is_empty());
 
         // Standard
-        let mut a = BitSet::from_bytes(&[0b10100010]);
-        let mut b = BitSet::from_bytes(&[0b01100010]);
+        let mut a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let mut b = BitArraySet::<u32, U8>::from_bytes(&[0b01100010]);
         let c = a.clone();
         a.intersect_with(&b);
         b.intersect_with(&c);
@@ -1206,20 +1133,20 @@ mod tests {
     #[test]
     fn test_bit_set_difference_with() {
         // Explicitly 0'ed bits
-        let mut a = BitSet::from_bytes(&[0b00000000]);
-        let b = BitSet::from_bytes(&[0b10100010]);
+        let mut a = BitArraySet::<u32, U8>::from_bytes(&[0b00000000]);
+        let b = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
         a.difference_with(&b);
         assert!(a.is_empty());
 
         // Uninitialized bits should behave like 0's
-        let mut a = BitSet::new();
-        let b = BitSet::from_bytes(&[0b11111111]);
+        let mut a = BitArraySet::<u32, U8>::new();
+        let b = BitArraySet::<u32, U8>::from_bytes(&[0b11111111]);
         a.difference_with(&b);
         assert!(a.is_empty());
 
         // Standard
-        let mut a = BitSet::from_bytes(&[0b10100010]);
-        let mut b = BitSet::from_bytes(&[0b01100010]);
+        let mut a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let mut b = BitArraySet::<u32, U8>::from_bytes(&[0b01100010]);
         let c = a.clone();
         a.difference_with(&b);
         b.difference_with(&c);
@@ -1230,25 +1157,25 @@ mod tests {
     #[test]
     fn test_bit_set_symmetric_difference_with() {
         //a should grow to include larger elements
-        let mut a = BitSet::new();
+        let mut a = BitArraySet::<u32, U8>::new();
         a.insert(0);
         a.insert(1);
-        let mut b = BitSet::new();
+        let mut b = BitArraySet::<u32, U8>::new();
         b.insert(1);
         b.insert(5);
-        let expected = BitSet::from_bytes(&[0b10000100]);
+        let expected = BitArraySet::<u32, U8>::from_bytes(&[0b10000100]);
         a.symmetric_difference_with(&b);
         assert_eq!(a, expected);
 
-        let mut a = BitSet::from_bytes(&[0b10100010]);
-        let b = BitSet::new();
+        let mut a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let b = BitArraySet::<u32, U8>::new();
         let c = a.clone();
         a.symmetric_difference_with(&b);
         assert_eq!(a, c);
 
         // Standard
-        let mut a = BitSet::from_bytes(&[0b11100010]);
-        let mut b = BitSet::from_bytes(&[0b01101010]);
+        let mut a = BitArraySet::<u32, U8>::from_bytes(&[0b11100010]);
+        let mut b = BitArraySet::<u32, U8>::from_bytes(&[0b01101010]);
         let c = a.clone();
         a.symmetric_difference_with(&b);
         b.symmetric_difference_with(&c);
@@ -1258,9 +1185,9 @@ mod tests {
 
     #[test]
     fn test_bit_set_eq() {
-        let a = BitSet::from_bytes(&[0b10100010]);
-        let b = BitSet::from_bytes(&[0b00000000]);
-        let c = BitSet::new();
+        let a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let b = BitArraySet::<u32, U8>::from_bytes(&[0b00000000]);
+        let c = BitArraySet::<u32, U8>::new();
 
         assert!(a == a);
         assert!(a != b);
@@ -1272,9 +1199,9 @@ mod tests {
 
     #[test]
     fn test_bit_set_cmp() {
-        let a = BitSet::from_bytes(&[0b10100010]);
-        let b = BitSet::from_bytes(&[0b00000000]);
-        let c = BitSet::new();
+        let a = BitArraySet::<u32, U8>::from_bytes(&[0b10100010]);
+        let b = BitArraySet::<u32, U8>::from_bytes(&[0b00000000]);
+        let c = BitArraySet::<u32, U8>::new();
 
         assert_eq!(a.cmp(&b), Greater);
         assert_eq!(a.cmp(&c), Greater);
@@ -1285,8 +1212,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bit_vec_remove() {
-        let mut a = BitSet::new();
+    fn test_bit_array_remove() {
+        let mut a = BitArraySet::<u32, U1001>::new();
 
         assert!(a.insert(1));
         assert!(a.remove(1));
@@ -1296,12 +1223,11 @@ mod tests {
 
         assert!(a.insert(1000));
         assert!(a.remove(1000));
-        a.shrink_to_fit();
     }
 
     #[test]
-    fn test_bit_vec_clone() {
-        let mut a = BitSet::new();
+    fn test_bit_array_clone() {
+        let mut a = BitArraySet::<u32, U1001>::new();
 
         assert!(a.insert(1));
         assert!(a.insert(100));
@@ -1321,11 +1247,11 @@ mod tests {
 /*
     #[test]
     fn test_bit_set_append() {
-        let mut a = BitSet::new();
+        let mut a = BitArraySet::new();
         a.insert(2);
         a.insert(6);
 
-        let mut b = BitSet::new();
+        let mut b = BitArraySet::new();
         b.insert(1);
         b.insert(3);
         b.insert(6);
@@ -1336,13 +1262,13 @@ mod tests {
         assert_eq!(b.len(), 0);
         assert!(b.capacity() >= 6);
 
-        assert_eq!(a, BitSet::from_bytes(&[0b01110010]));
+        assert_eq!(a, BitArraySet::from_bytes(&[0b01110010]));
     }
 
     #[test]
     fn test_bit_set_split_off() {
         // Split at 0
-        let mut a = BitSet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
+        let mut a = BitArraySet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
                                          0b00110011, 0b01101011, 0b10101101]);
 
         let b = a.split_off(0);
@@ -1350,11 +1276,11 @@ mod tests {
         assert_eq!(a.len(), 0);
         assert_eq!(b.len(), 21);
 
-        assert_eq!(b, BitSet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
+        assert_eq!(b, BitArraySet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
                                            0b00110011, 0b01101011, 0b10101101]);
 
         // Split behind last element
-        let mut a = BitSet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
+        let mut a = BitArraySet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
                                          0b00110011, 0b01101011, 0b10101101]);
 
         let b = a.split_off(50);
@@ -1362,11 +1288,11 @@ mod tests {
         assert_eq!(a.len(), 21);
         assert_eq!(b.len(), 0);
 
-        assert_eq!(a, BitSet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
+        assert_eq!(a, BitArraySet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
                                            0b00110011, 0b01101011, 0b10101101]));
 
         // Split at arbitrary element
-        let mut a = BitSet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
+        let mut a = BitArraySet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
                                          0b00110011, 0b01101011, 0b10101101]);
 
         let b = a.split_off(34);
@@ -1374,9 +1300,9 @@ mod tests {
         assert_eq!(a.len(), 12);
         assert_eq!(b.len(), 9);
 
-        assert_eq!(a, BitSet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
+        assert_eq!(a, BitArraySet::from_bytes(&[0b10100000, 0b00010010, 0b10010010,
                                            0b00110011, 0b01000000]));
-        assert_eq!(b, BitSet::from_bytes(&[0, 0, 0, 0,
+        assert_eq!(b, BitArraySet::from_bytes(&[0, 0, 0, 0,
                                            0b00101011, 0b10101101]));
     }
 */
@@ -1384,13 +1310,14 @@ mod tests {
 
 #[cfg(all(test, feature = "nightly"))]
 mod bench {
-    use super::BitSet;
-    use bit_vec::BitVec;
+    use super::BitArraySet;
+    use bit_array::BitArray;
     use rand::{Rng, thread_rng, ThreadRng};
+    use typenum::*;
 
     use test::{Bencher, black_box};
 
-    const BENCH_BITS: usize = 1 << 14;
+    //const BENCH_BITS: usize = 1 << 14;
     const BITS: usize = 32;
 
     fn rng() -> ThreadRng {
@@ -1398,36 +1325,36 @@ mod bench {
     }
 
     #[bench]
-    fn bench_bit_vecset_small(b: &mut Bencher) {
+    fn bench_bit_arrayset_small(b: &mut Bencher) {
         let mut r = rng();
-        let mut bit_vec = BitSet::new();
+        let mut bit_arrayset = BitArraySet::<u32, U32>::new();
         b.iter(|| {
             for _ in 0..100 {
-                bit_vec.insert((r.next_u32() as usize) % BITS);
+                bit_arrayset.insert((r.next_u32() as usize) % BITS);
             }
-            black_box(&bit_vec);
+            black_box(&bit_arrayset);
         });
     }
 
     #[bench]
-    fn bench_bit_vecset_big(b: &mut Bencher) {
+    fn bench_bit_arrayset_big(b: &mut Bencher) {
         let mut r = rng();
-        let mut bit_vec = BitSet::new();
+        let mut bit_arrayset = BitArraySet::<u32, U16384>::new();
         b.iter(|| {
             for _ in 0..100 {
-                bit_vec.insert((r.next_u32() as usize) % BENCH_BITS);
+                bit_arrayset.insert((r.next_u32() as usize) % U16384::to_usize());
             }
-            black_box(&bit_vec);
+            black_box(&bit_arrayset);
         });
     }
 
     #[bench]
-    fn bench_bit_vecset_iter(b: &mut Bencher) {
-        let bit_vec = BitSet::from_bit_vec(BitVec::from_fn(BENCH_BITS,
+    fn bench_bit_arrayset_iter(b: &mut Bencher) {
+        let bit_arrayset = BitArraySet::from_bit_array(BitArray::<u32, U32>::from_fn(
                                               |idx| {idx % 3 == 0}));
         b.iter(|| {
             let mut sum = 0;
-            for idx in &bit_vec {
+            for idx in &bit_arrayset {
                 sum += idx as usize;
             }
             sum

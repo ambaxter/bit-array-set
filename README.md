@@ -1,4 +1,4 @@
-A Set of bits.
+A Set of bits backed by bit-array
 
 Documentation is available at https://contain-rs.github.io/bit-set/bit_set.
 
