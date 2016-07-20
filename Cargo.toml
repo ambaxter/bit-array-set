@@ -4,9 +4,9 @@ version = "0.4.0"
 authors = ["Alexis Beingessner <a.beingessner@gmail.com>", "Adam Baxter"]
 license = "MIT/Apache-2.0"
 description = "A set of bits backed by bit-array"
-repository = "https://github.com/ambaxter/bit-array-set"
-homepage = "https://github.com/ambaxter/bit-array-set"
-documentation = "https://contain-rs.github.io/bit-set/bit_set"
+repository = "https://github.com/ambaxter/bitarray-set"
+homepage = "https://github.com/ambaxter/bitarray-set"
+documentation = "https://ambaxter.github.io/bitarray_set/bitarray_set/"
 keywords = ["data-structures", "bitset", "bitarray"]
 readme = "README.md"
 
