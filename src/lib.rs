@@ -850,6 +850,105 @@ impl<'a, B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> IntoIterator
     }
 }
 
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> Not for BitArraySet<B, NBits>
+    where NBits: Add<<B as BitsIn>::Output>,
+          <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+          <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+          <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+    type Output = BitArraySet<B, NBits>;
+
+    fn not(self) -> Self::Output {
+        let mut not = self.clone();
+        not.bit_array.negate();
+        not
+    }
+}
+
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> BitAnd for BitArraySet<B, NBits>
+    where NBits: Add<<B as BitsIn>::Output>,
+          <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+          <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+          <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+    type Output = BitArraySet<B, NBits>;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        let mut and = self.clone();
+        and.intersect_with(&rhs);
+        and
+    }
+
+}
+
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> BitAndAssign for BitArraySet<B, NBits>
+    where NBits: Add<<B as BitsIn>::Output>,
+          <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+          <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+          <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.intersect_with(&rhs);
+    }
+
+}
+
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> BitOr for BitArraySet<B, NBits>
+    where NBits: Add<<B as BitsIn>::Output>,
+          <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+          <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+          <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+    type Output = BitArraySet<B, NBits>;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        let mut or = self.clone();
+        or.union_with(&rhs);
+        or
+    }
+
+}
+
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> BitOrAssign for BitArraySet<B, NBits>
+    where NBits: Add<<B as BitsIn>::Output>,
+          <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+          <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+          <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.union_with(&rhs);
+    }
+
+}
+
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> BitXor for BitArraySet<B, NBits>
+    where NBits: Add<<B as BitsIn>::Output>,
+          <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+          <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+          <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+    type Output = BitArraySet<B, NBits>;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        let mut xor = self.clone();
+        xor.symmetric_difference_with(&rhs);
+        xor
+    }
+
+}
+
+impl<B: BitsIn + BitBlock + Default, NBits: Unsigned + NonZero> BitXorAssign for BitArraySet<B, NBits>
+    where NBits: Add<<B as BitsIn>::Output>,
+          <NBits as Add<<B as BitsIn>::Output>>::Output: Sub<typenum::B1>,
+          <<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output: Div<<B as BitsIn>::Output>,
+          <<<NBits as Add<<B as BitsIn>::Output>>::Output as Sub<typenum::B1>>::Output as Div<<B as BitsIn>::Output>>::Output: generic_array::ArrayLength<B>
+{
+    fn bitxor_assign(&mut self, rhs: Self) {
+        self.symmetric_difference_with(&rhs);
+    }
+
+}
+
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering::{Equal, Greater, Less};
